@@ -11,6 +11,7 @@ import joblib
 import pickle
 from datetime import datetime
 import warnings
+import calendar
 warnings.filterwarnings('ignore')
 
 plt.style.use('seaborn-v0_8')
@@ -40,13 +41,16 @@ class CovidMeteoPredictor:
         return france_data
     
     def load_meteo_data(self, file_path):
-        """Charge les données météorologiques de toutes les villes"""
+        """Charge les données météorologiques de toutes les villes et les étend au niveau quotidien"""
         print("Chargement des données météorologiques...")
         df = pd.read_csv(file_path, sep=';')
         
         meteo_data = df.copy()
         
-        meteo_data['date'] = pd.to_datetime(meteo_data['AAAAMM'], format='%Y%m')
+        meteo_data['AAAAMM_str'] = meteo_data['AAAAMM'].astype(str)
+        meteo_data['year'] = meteo_data['AAAAMM_str'].str[:4].astype(int)
+        meteo_data['month'] = meteo_data['AAAAMM_str'].str[4:6].astype(int)
+        meteo_data['date_month'] = pd.to_datetime(meteo_data[['year', 'month']].assign(day=1))
         
         meteo_data = meteo_data.rename(columns={
             'RR': 'precipitation_mm',
@@ -56,32 +60,48 @@ class CovidMeteoPredictor:
             'TM': 'temperature_moyenne'
         })
         
-        meteo_features = ['date', 'precipitation_mm', 'humidite_moyenne', 'insolation_hours', 'temperature_moyenne']
-        meteo_data = meteo_data[meteo_features]
-        
         meteo_data = meteo_data.replace('', np.nan)
         numeric_cols = ['precipitation_mm', 'humidite_moyenne', 'insolation_hours', 'temperature_moyenne']
         meteo_data[numeric_cols] = meteo_data[numeric_cols].astype(float)
         meteo_data = meteo_data.fillna(meteo_data[numeric_cols].mean())
         
-        print(f"Données météorologiques chargées: {len(meteo_data)} lignes")
-        return meteo_data
+        print("Extension des données mensuelles au niveau quotidien...")
+        daily_data = []
+        
+        for idx, (_, row) in enumerate(meteo_data.iterrows()):
+            if idx % 100 == 0:
+                print(f"  Progression: {idx}/{len(meteo_data)} lignes traitées")
+                
+            year, month = row['year'], row['month']
+            
+            days_in_month = calendar.monthrange(year, month)[1]
+            
+            for day in range(1, days_in_month + 1):
+                daily_row = row.copy()
+                daily_row['date'] = pd.Timestamp(year, month, day)
+                daily_data.append(daily_row)
+        
+        daily_meteo = pd.DataFrame(daily_data)
+        
+        meteo_features = ['date', 'precipitation_mm', 'humidite_moyenne', 'insolation_hours', 'temperature_moyenne']
+        daily_meteo = daily_meteo[meteo_features]
+        
+        print(f"Données météorologiques chargées: {len(meteo_data)} lignes mensuelles → {len(daily_meteo)} lignes quotidiennes")
+        return daily_meteo
     
     def merge_data(self, covid_data, meteo_data):
-        """Fusionne les données COVID et météo par date"""
-        print("Fusion des données...")
+        """Fusionne les données COVID et météo par date exacte (quotidienne)"""
+        print("Fusion des données par date quotidienne...")
         
-        covid_data['year_month'] = covid_data['date'].dt.to_period('M')
-        meteo_data['year_month'] = meteo_data['date'].dt.to_period('M')
+        covid_data['date'] = pd.to_datetime(covid_data['date'])
+        meteo_data['date'] = pd.to_datetime(meteo_data['date'])
         
-        merged_data = pd.merge(covid_data, meteo_data, on='year_month', how='inner')
-        
-        merged_data = merged_data.drop(['date_y', 'year_month'], axis=1)
-        merged_data = merged_data.rename(columns={'date_x': 'date'})
+        merged_data = pd.merge(covid_data, meteo_data, on='date', how='inner')
         
         merged_data = merged_data.sort_values('date')
         
-        print(f"Données fusionnées: {len(merged_data)} lignes")
+        print(f"Données fusionnées: {len(merged_data)} lignes quotidiennes")
+        print(f"Période couverte: {merged_data['date'].min()} à {merged_data['date'].max()}")
         return merged_data
     
     def create_features(self, data):
@@ -184,7 +204,7 @@ class CovidMeteoPredictor:
         print("Génération des visualisations...")
         
         fig, axes = plt.subplots(2, 2, figsize=(15, 12))
-        fig.suptitle('Prédiction COVID-19 basée sur les données météorologiques - France', fontsize=16)
+        fig.suptitle('Prédiction COVID-19 quotidienne basée sur les données météorologiques - France', fontsize=16)
         
         model_names = list(results.keys())
         rmse_scores = [results[name]['rmse'] for name in model_names]
@@ -237,13 +257,14 @@ class CovidMeteoPredictor:
     def generate_report(self, results):
         """Génère un rapport détaillé"""
         print("\n" + "="*60)
-        print("RAPPORT D'ANALYSE - PRÉDICTION COVID-19 / MÉTÉO")
+        print("RAPPORT D'ANALYSE - PRÉDICTION COVID-19 QUOTIDIENNE / MÉTÉO")
         print("="*60)
         
         print(f"\nDonnées utilisées:")
-        print(f"- Période: Données COVID-19 et météorologiques fusionnées")
+        print(f"- Période: Données COVID-19 et météorologiques fusionnées quotidiennement")
         print(f"- Localisation: France (données météo de toutes les villes)")
         print(f"- Variables météo: Précipitations, humidité, insolation, température")
+        print(f"- Résolution temporelle: Prédictions jour par jour")
         
         print(f"\nRésultats des modèles:")
         print("-" * 40)
@@ -392,6 +413,6 @@ if __name__ == "__main__":
     predictor = CovidMeteoPredictor()
     results, best_model = predictor.run_analysis(
         'data/owid-covid-data_cleaned.csv',
-        'data/fusion_meteo_2.csv',
+        'data/fusion_meteo_3.csv',
         save_model=True
     ) 
