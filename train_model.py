@@ -2,8 +2,8 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
+import sys
 from sklearn.model_selection import train_test_split, cross_val_score
-from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
 from sklearn.linear_model import LinearRegression
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
@@ -12,6 +12,12 @@ import pickle
 from datetime import datetime
 import warnings
 import calendar
+
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.tree import DecisionTreeRegressor
+sys.modules['RandomForestRegressor'] = RandomForestRegressor
+sys.modules['DecisionTreeRegressor'] = DecisionTreeRegressor
+
 warnings.filterwarnings('ignore')
 
 plt.style.use('seaborn-v0_8')
@@ -23,6 +29,28 @@ class CovidMeteoPredictor:
         self.scaler = StandardScaler()
         self.feature_importance = {}
         
+        self.required_columns = ['date', 'rr', 'umm', 'inst', 'tm', 'new_cases', 'new_deaths']
+        self.transformed_features = [
+            'precipitation_mm', 'humidite_moyenne', 'insolation_hours', 'temperature_moyenne',
+            'month', 'season', 'new_cases_7d_avg', 'new_deaths_7d_avg', 
+            'temp_humidity_interaction', 'precipitation_binary', 'new_cases_lag_1', 'new_cases_lag_7'
+        ]
+        
+    def validate_columns(self, data, data_type=""):
+        """Valide que les colonnes obligatoires sont présentes"""
+        if data_type == "meteo":
+            required_meteo = ['date', 'RR', 'UMM', 'INST', 'TM']
+            missing_cols = [col for col in required_meteo if col not in data.columns]
+            if missing_cols:
+                raise ValueError(f"Colonnes manquantes dans les données météo: {missing_cols}")
+        elif data_type == "covid":
+            required_covid = ['date', 'new_cases', 'new_deaths']
+            missing_cols = [col for col in required_covid if col not in data.columns]
+            if missing_cols:
+                raise ValueError(f"Colonnes manquantes dans les données COVID: {missing_cols}")
+        print(f"Validation des colonnes {data_type} réussie")
+        return True
+    
     def load_covid_data(self, file_path):
         """Charge les données COVID-19 et filtre pour la France"""
         print("Chargement des données COVID-19...")
@@ -35,13 +63,20 @@ class CovidMeteoPredictor:
         covid_features = ['date', 'new_cases', 'new_deaths', 'total_cases', 'total_deaths']
         france_data = france_data[covid_features]
         
+        self.validate_columns(france_data, "covid")
+        
         france_data = france_data.fillna(0)
         
         print(f"Données COVID-19 chargées: {len(france_data)} lignes")
         return france_data
     
     def load_meteo_data(self, file_path):
-        """Charge les données météorologiques de toutes les villes et les étend au niveau quotidien"""
+        """Charge les données météorologiques de toutes les villes et les étend au niveau quotidien
+        
+        WORKFLOW RECOMMANDÉ:
+        Colonnes obligatoires en entrée: ['date', 'rr', 'umm', 'inst', 'tm', 'new_cases', 'new_deaths']
+        Transformation: rr -> precipitation_mm, umm -> humidite_moyenne, inst -> insolation_hours, tm -> temperature_moyenne
+        """
         print("Chargement des données météorologiques...")
         df = pd.read_csv(file_path, sep=';')
         
@@ -59,6 +94,12 @@ class CovidMeteoPredictor:
             'INST': 'insolation_hours',
             'TM': 'temperature_moyenne'
         })
+        
+        required_meteo_cols = ['precipitation_mm', 'humidite_moyenne', 'insolation_hours', 'temperature_moyenne']
+        missing_cols = [col for col in required_meteo_cols if col not in meteo_data.columns]
+        if missing_cols:
+            raise ValueError(f"Colonnes manquantes dans les données météo après transformation: {missing_cols}")
+        print("✓ Validation des colonnes météo réussie")
         
         meteo_data = meteo_data.replace('', np.nan)
         numeric_cols = ['precipitation_mm', 'humidite_moyenne', 'insolation_hours', 'temperature_moyenne']
@@ -126,15 +167,16 @@ class CovidMeteoPredictor:
         return data
     
     def prepare_data(self, data, target='new_cases'):
-        """Prépare les données pour l'entraînement"""
+        """Prépare les données pour l'entraînement
+        
+        WORKFLOW RECOMMANDÉ - Features finales:
+        ['precipitation_mm', 'humidite_moyenne', 'insolation_hours', 'temperature_moyenne',
+         'month', 'season', 'new_cases_7d_avg', 'new_deaths_7d_avg', 
+         'temp_humidity_interaction', 'precipitation_binary', 'new_cases_lag_1', 'new_cases_lag_7']
+        """
         print("Préparation des données pour l'entraînement...")
         
-        feature_columns = [
-            'precipitation_mm', 'humidite_moyenne', 'insolation_hours', 'temperature_moyenne',
-            'month', 'season', 'new_cases_7d_avg', 'new_deaths_7d_avg',
-            'temp_humidity_interaction', 'precipitation_binary',
-            'new_cases_lag_1', 'new_cases_lag_7'
-        ]
+        feature_columns = self.transformed_features
         
         available_features = [col for col in feature_columns if col in data.columns]
         
@@ -161,7 +203,7 @@ class CovidMeteoPredictor:
         
         models = {
             'Random Forest': RandomForestRegressor(n_estimators=100, random_state=42),
-            'Gradient Boosting': GradientBoostingRegressor(n_estimators=100, random_state=42),
+            'Decision Tree': DecisionTreeRegressor(random_state=42),
             'Linear Regression': LinearRegression()
         }
         
@@ -311,7 +353,9 @@ class CovidMeteoPredictor:
         }
         
         model_filename = f'best_covid_meteo_model_{best_model_name.replace(" ", "_").lower()}.pkl'
-        joblib.dump(model_package, model_filename)
+        
+        with open(model_filename, 'wb') as f:
+            pickle.dump(model_package, f)
         
         metadata_filename = f'model_metadata_{best_model_name.replace(" ", "_").lower()}.txt'
         with open(metadata_filename, 'w', encoding='utf-8') as f:
@@ -340,7 +384,8 @@ class CovidMeteoPredictor:
         print(f"Chargement du modèle: {model_filename}")
         
         try:
-            model_package = joblib.load(model_filename)
+            with open(model_filename, 'rb') as f:
+                model_package = pickle.load(f)
             
             print(f"Modèle chargé: {model_package['model_name']}")
             print(f"Type: {model_package['model_type']}")
